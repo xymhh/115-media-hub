@@ -1661,6 +1661,11 @@ def _clean_scraper_filename(name: str) -> str:
 
 
 _SCRAPER_ANCHOR_YEAR_RE = re.compile(r"(?<![0-9])(?:19|20)\d{2}(?![0-9])")
+# 年份与分辨率粘连（“20254K”“20231080p”）时严格正则因后随数字不匹配，整串发布参数
+# 会被当成标题去搜 TMDB；补一个只认年份前缀的宽松锚点，保证在年份处断开。
+_SCRAPER_ANCHOR_GLUED_YEAR_RE = re.compile(
+    r"(?<![0-9])(?:19|20)\d{2}(?=[0-9]{1,2}[Kk]\b|[0-9]{3,4}[PpIi]\b)"
+)
 _SCRAPER_ANCHOR_EPISODE_RE = re.compile(
     r"(?i)(?:\bs\d{1,2}\s*e\d{1,4}\b|\bep?\s*\d{1,4}\b|\be\d{1,4}\b|\bseason\s*\d{1,2}\b|"
     r"第\s*[0-9零〇一二三四五六七八九十两兩]{1,4}\s*(?:季|集|话|話))"
@@ -1674,6 +1679,8 @@ def _scraper_anchor_positions(raw_text: str) -> List[int]:
     for start, _end in spans if isinstance(spans, list) else []:
         positions.append(max(0, int(start)))
     for match in _SCRAPER_ANCHOR_YEAR_RE.finditer(raw_text):
+        positions.append(match.start())
+    for match in _SCRAPER_ANCHOR_GLUED_YEAR_RE.finditer(raw_text):
         positions.append(match.start())
     for match in _SCRAPER_ANCHOR_EPISODE_RE.finditer(raw_text):
         positions.append(match.start())
@@ -1869,6 +1876,24 @@ _SCRAPER_SUBTITLE_MARKER_RE = re.compile(
     r"(?:字幕|字幕组|字幕組|简繁|簡繁|简中|簡中|繁中|中英|國英|国英|国粤|國粵|"
     r"双语|雙語|中字|英字|国语|國語|粤语|粵語|配音|音轨|音軌)"
 )
+# 发布参数（画质/编码/压制说明）不该当作片名去搜 TMDB。中文片名与参数混排的目录名
+# （如 “The Terminal List黑狼 (20254K.HDR＆杜比视界 内封精修简英双语…”）会被拆成
+# 带参数的片段，排在干净片名之前，导致主查询搜不到。命中这些标记的候选降级到末尾。
+_SCRAPER_TECH_NOISE_TOKEN_RE = re.compile(
+    r"(?i)(?:\b[0-9]{3,4}[pi]\b|\b[0-9]{1,2}k\b|\bhdr\b|\bdv\b|杜比|dolby|"
+    r"web-?dl|blu-?ray|remux|内封|精修|珍藏|收藏版|\bsup\b|\bsub\b|"
+    r"h\.?26[45]|hevc|avc|x26[45]|10bit|\bamzn\b|\bnf\b|\bdsnp\b|\bhmax\b)"
+)
+
+
+def _is_scraper_technical_noise_candidate(text: str) -> bool:
+    """候选标题里是否混入了发布参数（画质/编码/字幕说明），用于把干净片名排到前面。"""
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if _SCRAPER_SUBTITLE_MARKER_RE.search(value):
+        return True
+    return bool(_SCRAPER_TECH_NOISE_TOKEN_RE.search(value))
 # 目录/占位用的结构性中文词，不应被当成片名（如“文件夹A”“新建文件夹”）。
 _SCRAPER_STRUCTURAL_CJK_TITLES = frozenset({
     "文件夹", "新建文件夹", "未命名", "未命名文件夹", "根目录",
@@ -1924,9 +1949,15 @@ def _extract_scraper_title_candidates(raw: str, preserve_colon: bool = False) ->
     )
     split_candidates: List[str] = []
     for candidate in candidates:
-        split_candidates.extend(_split_scraper_mixed_language_title(candidate, preserve_colon=preserve_colon))
+        for piece in _split_scraper_mixed_language_title(candidate, preserve_colon=preserve_colon):
+            # 中英混排拆分出的片段若带发布参数（双语/杜比/分辨率），不能当片名去搜。
+            if _is_scraper_technical_noise_candidate(piece):
+                continue
+            split_candidates.append(piece)
     candidates = _merge_scraper_title_candidates(split_candidates + candidates)
-    return candidates
+    clean = [item for item in candidates if not _is_scraper_technical_noise_candidate(item)]
+    noisy = [item for item in candidates if _is_scraper_technical_noise_candidate(item)]
+    return clean + noisy
 
 
 def _extract_scraper_filename_cjk_title(raw: str) -> str:
@@ -6092,11 +6123,24 @@ def _identify_scraper_batch_item(
             search_queries.append(candidate)
         raw_candidates: List[Dict[str, Any]] = []
         query_index = 0
+        best_top_score = -1
         for index, candidate_query in enumerate(search_queries):
             found = _search_batch_tmdb_candidates(candidate_query, media_type, year, cfg)
-            if found:
+            if not found:
+                continue
+            query_penalty = 25 * index
+            top_score = max(
+                max(0, int(_score_batch_tmdb_candidate(candidate_query, year, media_type, item) or 0))
+                - query_penalty
+                for item in found
+            )
+            # 目录名脏时靠前的候选可能命中错误条目（同名老剧/无关片）：只有分数够高才
+            # 提前收工，否则继续试后面的候选，避免整包被锁死在错条目上而留在接收夹。
+            if top_score > best_top_score:
+                best_top_score = top_score
                 raw_candidates = found
                 query_index = index
+            if top_score >= 80:
                 break
         # 只有主查询命中的候选才可能自动匹配；降级查询命中一律扣分，避免误自动选片。
         degradation_penalty = 25 * query_index
