@@ -95,5 +95,40 @@ class TestQuarkShareRootFallback(unittest.TestCase):
         self.assertEqual(payload["entries"], [])
 
 
+
+class TestQuarkShareRootFallbackFastPath(TestQuarkShareRootFallback):
+    """前端分页浏览走的是 fast 路径，必须同样带 first_fid 兜底。"""
+
+    def test_fast_root_empty_list_retries_with_first_fid(self):
+        fast_calls = []
+
+        def _fake_fast(method, url, headers, deadline_ts, fallback=""):
+            fast_calls.append(url)
+            return {
+                "status": 200,
+                "code": 0,
+                "data": {"list": [], "share": {"pwd_id": "pwd1", "first_fid": "fid-root"}},
+            }
+
+        slow_calls = []
+
+        def _fake_slow(url, headers, timeout=45, fallback=""):
+            slow_calls.append(url)
+            return {
+                "status": 200,
+                "code": 0,
+                "data": {"list": [_entry("f9", "fast根目录.mkv")], "share": {"pwd_id": "pwd1"}},
+            }
+
+        with mock.patch.object(quark, "_request_quark_json_fast", side_effect=_fake_fast), \
+                mock.patch.object(quark, "_request_quark_json", side_effect=_fake_slow):
+            payload = quark._list_quark_share_page_fast(
+                "cookie", "pwd1", "stoken-d", "0", 1, 50, True, 10.0
+            )
+
+        self.assertEqual(len(fast_calls), 1)
+        self.assertTrue(any("pdir_fid=fid-root" in url for url in slow_calls))
+        self.assertEqual([e["name"] for e in payload["entries"]], ["fast根目录.mkv"])
+
 if __name__ == "__main__":
     unittest.main()

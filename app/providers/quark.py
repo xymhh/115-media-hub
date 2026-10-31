@@ -1383,6 +1383,31 @@ def _list_quark_share_page_fast(
         share_info = data.get("share") if isinstance(data.get("share"), dict) else {}
         if not share_info:
             share_info = data.get("share_info") if isinstance(data.get("share_info"), dict) else {}
+        if parent_id == "0" and not entries:
+            # 与 _list_quark_share_page 同款兜底：根目录空 list 时按 first_fid 再查一次，
+            # 否则快捷浏览路径（前端分页默认走这里）永远读不到根目录内容。
+            first_fid = str(share_info.get("first_fid") or data.get("first_fid") or "").strip()
+            if first_fid and first_fid != "0":
+                retry_page = _list_quark_share_page(
+                    cookie,
+                    normalized_pwd_id,
+                    str(stoken or "").strip(),
+                    first_fid,
+                    page=page_no,
+                    page_size=normalized_size,
+                    force_refresh=True,
+                    timeout=max(5, int(_QUARK_SHARE_FAST_DEADLINE_SECONDS or 5) * 4),
+                )
+                retry_entries = retry_page.get("entries") or []
+                if retry_entries:
+                    entries = retry_entries
+                    share_info = retry_page.get("share") or share_info
+                    data = {
+                        **data,
+                        "has_more": retry_page.get("has_more", False),
+                        "next_page": retry_page.get("next_page", 0),
+                        "total": retry_page.get("total", len(retry_entries)),
+                    }
         has_more = bool(data.get("has_more", False))
         next_page = parse_int(data.get("next_page"), default=0)
         if not has_more and next_page > page_no:
