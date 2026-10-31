@@ -1006,10 +1006,12 @@ async def run_resource_job(job_id: int) -> None:
                 started_at=now_text(),
             )
             try:
+                # 保存路径不存在时按路径逐层创建，与批量导入保持一致；
+                # 旧实现用 resolve_* 只查不建，路径稍不一致就直接「保存路径无效」。
                 if is_offline_link:
                     folder_id = await asyncio.wait_for(
                         asyncio.to_thread(
-                            mp.resolve_folder_id_by_path,
+                            mp.ensure_folder_id_by_path,
                             provider_cookie,
                             str(job.get("savepath", "") or "").strip(),
                         ),
@@ -1018,7 +1020,7 @@ async def run_resource_job(job_id: int) -> None:
                 else:
                     folder_id = await asyncio.wait_for(
                         asyncio.to_thread(
-                            share_provider.resolve_folder_id_by_path,
+                            share_provider.ensure_folder_id_by_path,
                             provider_cookie,
                             str(job.get("savepath", "") or "").strip(),
                         ),

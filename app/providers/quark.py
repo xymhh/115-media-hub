@@ -1143,43 +1143,62 @@ def _list_quark_share_page(
     # stoken 签名失配，返回 400「非法token」；纯字母数字的 stoken 碰巧两边
     # 相等所以时好时坏。
     stoken_query_value = str(stoken or "").strip()
-    url = _build_quark_api_url(
-        "/1/clouddrive/share/sharepage/detail",
-        {
-            "uc_param_str": "",
-            "pwd_id": normalized_pwd_id,
-            "stoken": stoken_query_value,
-            "pdir_fid": parent_id,
-            "force": 0,
-            "_page": page_no,
-            "_size": normalized_size,
-            "_fetch_banner": 1,
-            "_fetch_share": 1,
-            "_fetch_total": 1,
-            "_sort": "file_type:asc,file_name:asc",
-            "__dt": 1589,
-            "__t": int(time.time() * 1000),
-        },
-        host="https://drive-h.quark.cn",
-    )
-    result = _request_quark_json(url, headers, timeout=timeout, fallback="读取夸克分享目录失败")
-    if not _is_quark_success(result):
-        raise RuntimeError(_extract_quark_error(result, "读取夸克分享目录失败"))
-    data = result.get("data") if isinstance(result.get("data"), dict) else {}
-    raw_list = data.get("list") if isinstance(data.get("list"), list) else []
-    entries = []
-    for raw_item in raw_list:
-        parsed_entry = _parse_quark_entry(raw_item if isinstance(raw_item, dict) else {}, parent_id=parent_id)
-        if parsed_entry:
-            entries.append(parsed_entry)
-    share_info = data.get("share") if isinstance(data.get("share"), dict) else {}
-    if not share_info:
-        share_info = data.get("share_info") if isinstance(data.get("share_info"), dict) else {}
-    has_more = bool(data.get("has_more", False))
-    next_page = parse_int(data.get("next_page"), default=0)
-    if not has_more and next_page > max(1, int(page or 1)):
-        has_more = True
-    total = parse_int(data.get("total"), default=len(entries))
+
+    def _fetch_page(pid: str):
+        page_url = _build_quark_api_url(
+            "/1/clouddrive/share/sharepage/detail",
+            {
+                "uc_param_str": "",
+                "pwd_id": normalized_pwd_id,
+                "stoken": stoken_query_value,
+                "pdir_fid": pid,
+                "force": 0,
+                "_page": page_no,
+                "_size": normalized_size,
+                "_fetch_banner": 1,
+                "_fetch_share": 1,
+                "_fetch_total": 1,
+                "_sort": "file_type:asc,file_name:asc",
+                "__dt": 1589,
+                "__t": int(time.time() * 1000),
+            },
+            host="https://drive-h.quark.cn",
+        )
+        page_result = _request_quark_json(page_url, headers, timeout=timeout, fallback="读取夸克分享目录失败")
+        if not _is_quark_success(page_result):
+            raise RuntimeError(_extract_quark_error(page_result, "读取夸克分享目录失败"))
+        page_data = page_result.get("data") if isinstance(page_result.get("data"), dict) else {}
+        raw_items = page_data.get("list") if isinstance(page_data.get("list"), list) else []
+        parsed_entries = []
+        for raw_item in raw_items:
+            parsed_entry = _parse_quark_entry(raw_item if isinstance(raw_item, dict) else {}, parent_id=pid)
+            if parsed_entry:
+                parsed_entries.append(parsed_entry)
+        page_share_info = page_data.get("share") if isinstance(page_data.get("share"), dict) else {}
+        if not page_share_info:
+            page_share_info = page_data.get("share_info") if isinstance(page_data.get("share_info"), dict) else {}
+        page_has_more = bool(page_data.get("has_more", False))
+        page_next = parse_int(page_data.get("next_page"), default=0)
+        if not page_has_more and page_next > max(1, int(page or 1)):
+            page_has_more = True
+        page_total = parse_int(page_data.get("total"), default=len(parsed_entries))
+        return parsed_entries, page_share_info, page_has_more, page_next, page_total, page_data
+
+    entries, share_info, has_more, next_page, total, data = _fetch_page(parent_id)
+    if parent_id == "0" and not entries:
+        # 夸克分享根目录有时返回空 list：服务端要按 first_fid 再查一次才有内容。
+        # 旧逻辑把空列表当最终结果，前端就表现成「分享根目录的文件读不出来」。
+        first_fid = str(
+            (share_info or {}).get("first_fid") or data.get("first_fid") or ""
+        ).strip()
+        if first_fid and first_fid != "0":
+            retry_entries, retry_share, retry_more, retry_next, retry_total, _ = _fetch_page(first_fid)
+            if retry_entries:
+                entries = retry_entries
+                share_info = retry_share or share_info
+                has_more = retry_more
+                next_page = retry_next
+                total = max(retry_total, len(retry_entries))
     page_payload = {
         "entries": entries,
         "share": share_info,
